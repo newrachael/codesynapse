@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codesynapse"
+version = "0.1.0"
+authors = [
+  { name="Raykim", email="phillar85@gmail.com" }
+]
+description = "A powerful Python tool that visualizes code structure and relationships as interactive graphs"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+keywords = [
+    "code-analysis", "visualization", "ast", "graph", "python", 
+    "static-analysis", "code-structure", "dependencies", "interactive"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9", 
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "networkx>=2.8",
+    "pyvis>=0.3.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pytest-mock",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pytest-mock",
+    "build",
+    "twine",
+    "black",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/newrachael/codesynapse"
+Repository = "https://github.com/newrachael/codesynapse.git"
+Documentation = "https://github.com/newrachael/codesynapse#readme"
+"Bug Tracker" = "https://github.com/newrachael/codesynapse/issues"
+Changelog = "https://github.com/newrachael/codesynapse/blob/main/CHANGELOG.md"
+
+[project.scripts]
+codesynapse = "codesynapse.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["codesynapse*"]
+exclude = ["tests*"]

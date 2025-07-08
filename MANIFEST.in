@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+include CHANGELOG.md
+include pyproject.toml
+include pytest.ini
+recursive-include src/codesynapse *.py
+recursive-include tests *.py
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * *.so
+recursive-exclude * .DS_Store 
