@@ -110,8 +110,11 @@ class TestVisualizeGraph:
             
             # 기본 스타일 속성들이 있는지 확인
             assert "color" in kwargs
-            assert "dashes" in kwargs
             assert "arrows" in kwargs
+            
+            # dashes는 스타일에 따라 선택적으로 있을 수 있음
+            if expected_style and expected_style.get("style") in ["dashed", "dotted"]:
+                assert "dashes" in kwargs
     
     @patch('codesynapse.visualizer.Network')
     def test_hierarchical_layout_configuration(self, mock_network_class, sample_graph):
@@ -121,12 +124,18 @@ class TestVisualizeGraph:
         
         visualize_graph(sample_graph, "test_output.html")
         
-        # hrepulsion이 호출되었는지 확인 (hierarchical이 True인 경우)
-        if VISUAL_RULES["layout"]["hierarchical"]:
-            mock_net.hrepulsion.assert_called_once_with(
-                node_distance=300, 
-                central_gravity=0.5
-            )
+        # set_options가 호출되었는지 확인 (JSON 형태의 설정)
+        mock_net.set_options.assert_called_once()
+        
+        # 호출된 옵션이 JSON 문자열인지 확인
+        call_args = mock_net.set_options.call_args_list[0]
+        args, kwargs = call_args
+        options_json = args[0]
+        
+        # JSON 문자열이 파싱 가능한지 확인
+        import json
+        options = json.loads(options_json)
+        assert "physics" in options
     
     @patch('codesynapse.visualizer.Network')
     def test_node_label_formatting(self, mock_network_class, sample_graph):
@@ -141,12 +150,12 @@ class TestVisualizeGraph:
             args, kwargs = call
             node_id = args[0]
             
-            # 라벨은 마지막 부분만 사용해야 함
-            expected_label = node_id.split('.')[-1]
-            assert kwargs["label"] == expected_label
+            # 라벨은 아이콘과 함께 마지막 부분만 사용해야 함
+            expected_base_label = node_id.split('.')[-1]
+            assert expected_base_label in kwargs["label"]  # 아이콘이 있으므로 포함 여부만 확인
             
-            # 타이틀은 전체 경로여야 함
-            assert kwargs["title"] == node_id
+            # 타이틀은 전체 경로가 포함되어야 함
+            assert node_id in kwargs["title"]
     
     @patch('codesynapse.visualizer.Network')
     def test_default_filename(self, mock_network_class, sample_graph):
