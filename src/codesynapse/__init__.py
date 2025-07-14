@@ -10,7 +10,7 @@ import json
 from .builder import GraphBuilder
 from .serializer import GraphSerializer
 
-__version__ = "0.4.0-llm"
+__version__ = "0.4.1-llm"
 __author__ = "Raykim"
 __email__ = "phillar85@gmail.com"
 

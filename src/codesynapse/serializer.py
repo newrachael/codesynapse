@@ -9,7 +9,7 @@ import math
 import itertools
 from datetime import datetime
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 import networkx as nx
 
@@ -17,14 +17,18 @@ from .rules import NodeType, EdgeType, ComplexityLevel, DesignPattern
 
 
 def _tok(obj) -> int:
+    """Calculate approximate token count"""
     return math.ceil(len(json.dumps(obj, separators=(",", ":"))) / 4)
 
 
 def _short(name: str) -> str:
+    """Get the last part of a dotted name"""
     return name.split(".")[-1]
 
 
 class GraphSerializer:
+    """Serialize networkx graph to various formats optimized for LLMs"""
+    
     def __init__(
         self,
         graph: nx.DiGraph,
@@ -45,6 +49,7 @@ class GraphSerializer:
         self.complexity = complexity
         self.test_coverage = test_coverage
         self.detect_patterns = detect_patterns
+        self.debug = False  # Can be set externally
 
         # Pre-calculate common data
         self.ext_deps = sorted(
@@ -55,6 +60,7 @@ class GraphSerializer:
         ][:3]
 
     def serialize(self, mode="compressed"):
+        """Serialize graph to specified mode"""
         if mode == "summary":
             return self._summary()
         if mode == "compressed":
@@ -66,10 +72,12 @@ class GraphSerializer:
         raise ValueError(f"unknown mode {mode}")
 
     def to_llm_chunks(self, *, mode="compressed", max_tokens=4000):
+        """Split serialized data into chunks for LLM context limits"""
         data = self.serialize(mode)
         if mode == "summary":
             return [data]
 
+        # Determine the main list/dict key
         list_key = "edges" if "edges" in data else "nodes"
         if "modules" in data:
             list_key = "modules"
@@ -96,6 +104,7 @@ class GraphSerializer:
         return chunks
 
     def generate_view(self, view: str):
+        """Generate a specific view of the project"""
         view = view.lower()
         if view == "architecture":
             result = {
@@ -119,17 +128,20 @@ class GraphSerializer:
             return {
                 "main_flow": self._trace_main_flow(),
                 "call_chains": self._analyze_call_chains(),
+                "hot_paths": self._find_hot_paths(),
             }
             
         if view == "api":
             return {
                 "public_api": self._extract_public_api(),
                 "entry_points": self.entry_points,
+                "class_hierarchy": self._extract_class_hierarchy(),
             }
             
         raise ValueError("view must be architecture|dependencies|flow|api")
 
     def generate_natural_summary(self) -> str:
+        """Generate a natural language summary of the project"""
         stats = self._summary()["stats"]
         summary = (
             f"This project contains {stats['nodes']} components "
@@ -143,11 +155,16 @@ class GraphSerializer:
         
         if self.complexity:
             avg_complexity = self._calculate_avg_complexity()
-            summary += f"\nAverage complexity: {avg_complexity['rating']}"
+            summary += f"\nAverage complexity: {avg_complexity['rating']} (score: {avg_complexity['average']})"
+            
+        if self.test_coverage:
+            coverage = self._analyze_test_coverage()
+            summary += f"\nTest coverage: {coverage['test_modules']} test modules covering {coverage['coverage_ratio']*100:.0f}% of modules"
             
         return summary
 
     def _summary(self):
+        """Generate basic summary statistics"""
         nt, et = Counter(), Counter()
         for _, a in self.g.nodes(data=True):
             nt[a["type"].value] += 1
@@ -173,6 +190,7 @@ class GraphSerializer:
         return result
 
     def _compressed_index(self):
+        """Compressed format using string indexing"""
         strings, sindex = [], {}
         def idx(s):
             if s not in sindex:
@@ -180,12 +198,13 @@ class GraphSerializer:
                 strings.append(s)
             return sindex[s]
 
-        imp_thresh = max(
-            (a["importance"] for _, a in self.g.nodes(data=True)), default=0
-        ) * 0.05
+        # Calculate importance threshold
+        importances = [a.get("importance", 0) for _, a in self.g.nodes(data=True)]
+        imp_thresh = max(importances, default=0) * 0.05 if self.important_only and importances else -1
+        
         keep = {
             n for n, a in self.g.nodes(data=True)
-            if not self.important_only or a["importance"] >= imp_thresh
+            if not self.important_only or a.get("importance", 0) >= imp_thresh
         }
 
         nodes = [{"id": idx(n), "t": self.g.nodes[n]["type"].value} for n in keep]
@@ -198,7 +217,18 @@ class GraphSerializer:
         return {"strings": strings, "nodes": nodes, "edges": edges, "summary": self._summary()}
 
     def _compressed_friendly(self):
-        imp_thresh = max((a["importance"] for _, a in self.g.nodes(data=True)), default=0) * 0.05
+        """LLM-friendly compressed format"""
+        # Calculate importance threshold
+        importances = [a.get("importance", 0) for _, a in self.g.nodes(data=True)]
+        if importances and self.important_only:
+            imp_thresh = max(importances) * 0.05
+        else:
+            imp_thresh = -1  # Include all
+
+        if self.debug:
+            print(f"\n📊 Importance threshold: {imp_thresh}")
+            print(f"   Max importance: {max(importances) if importances else 0}")
+            print(f"   Important only: {self.important_only}")
 
         modules = {}
         for m, attrs in self.g.nodes(data=True):
@@ -215,17 +245,21 @@ class GraphSerializer:
                 "key_classes": [
                     _short(n) for n in self.g.nodes
                     if n.startswith(f"{m}.") and self.g.nodes[n]["type"] == NodeType.CLASS
+                    and "." not in n[len(m)+1:]  # Direct children only
                 ][:3],
                 "entry_points": [
                     _short(n) for n in self.g.nodes
                     if n.startswith(f"{m}.") and self.g.nodes[n]["type"] == NodeType.FUNCTION
-                       and _short(n) in ("main", "__init__", "__call__")
+                    and _short(n) in ("main", "__init__", "__call__")
+                    and "." not in n[len(m)+1:]  # Direct children only
                 ],
             }
             
             # Add code snippets if requested
             if self.include_code:
-                mod_info["functions"] = self._extract_module_functions(m, imp_thresh)
+                mod_info["functions"] = self._extract_all_module_functions(m, imp_thresh)
+                if self.debug and not mod_info["functions"]:
+                    print(f"   ⚠️  No functions found for module: {mod_name}")
                 
             # Add complexity metrics if requested
             if self.complexity:
@@ -233,11 +267,12 @@ class GraphSerializer:
                 
             modules[mod_name] = mod_info
 
+        # Key relations
         relations = [
             f"{_short(s)} → {_short(t)}"
             for s, t, a in self.g.edges(data=True)
             if a["type"] in (EdgeType.INHERITS, EdgeType.INSTANTIATES)
-               and self.g.nodes[s]["importance"] >= imp_thresh
+            and (not self.important_only or self.g.nodes[s].get("importance", 0) >= imp_thresh)
         ][:20]
 
         result = {"modules": modules, "relations": relations, "focus": "architecture overview"}
@@ -248,19 +283,30 @@ class GraphSerializer:
         return result
 
     def _full(self):
+        """Full format with all details"""
         nodes = []
         for n, a in self.g.nodes(data=True):
-            if self.important_only and a["importance"] == 0:
+            if self.important_only and a.get("importance", 0) == 0:
                 continue
                 
             node_data = {"id": n, "type": a["type"].value}
             
+            # Add all attributes
+            for key, value in a.items():
+                if key not in ["type", "importance"]:
+                    if hasattr(value, "value"):  # Enum
+                        node_data[key] = value.value
+                    else:
+                        node_data[key] = value
+            
+            # Add code info if requested
             if self.include_code and a["type"] == NodeType.FUNCTION:
                 if "signature" in a:
                     node_data["signature"] = a["signature"]
                 if "docstring" in a and a["docstring"]:
                     node_data["docstring"] = a["docstring"][:200]
                     
+            # Add complexity if requested
             if self.complexity and a["type"] == NodeType.FUNCTION:
                 if "cyclomatic_complexity" in a:
                     node_data["complexity"] = {
@@ -279,42 +325,99 @@ class GraphSerializer:
 
     # Enhanced helper methods
 
-    def _extract_module_functions(self, module: str, imp_thresh: float) -> Dict[str, Any]:
-        """Extract important functions with signatures"""
+    def _extract_all_module_functions(self, module: str, imp_thresh: float) -> Dict[str, Any]:
+        """Extract ALL functions (including class methods) with signatures"""
         functions = {}
         
+        if self.debug:
+            print(f"\n🔍 Extracting functions for module: {module}")
+            print(f"   Include code: {self.include_code}")
+            print(f"   Importance threshold: {imp_thresh}")
+        
+        # Find all functions in this module
+        module_functions = []
         for node_id, attrs in self.g.nodes(data=True):
-            if (node_id.startswith(f"{module}.") and 
-                attrs["type"] == NodeType.FUNCTION and
-                not _short(node_id).startswith("_") and
-                attrs["importance"] > imp_thresh and
-                "." not in node_id[len(module)+1:]):  # Module-level functions only
+            if (attrs["type"] == NodeType.FUNCTION and 
+                node_id.startswith(f"{module}.")):
                 
-                func_name = _short(node_id)
-                func_info = {}
+                # Check importance
+                node_importance = attrs.get("importance", 0)
+                if not self.important_only or node_importance >= imp_thresh:
+                    module_functions.append((node_id, attrs))
+                    if self.debug:
+                        print(f"   ✅ Found function: {node_id} (importance: {node_importance})")
+                elif self.debug:
+                    print(f"   ❌ Skipped due to importance: {node_id} ({node_importance} < {imp_thresh})")
+        
+        if self.debug:
+            print(f"   Total functions found: {len(module_functions)}")
+        
+        # Process each function
+        for node_id, attrs in module_functions:
+            # Determine display name
+            parts = node_id.split('.')
+            if len(parts) >= 3:  # Class method: module.Class.method
+                func_name = f"{parts[-2]}.{parts[-1]}"
+            else:  # Module function: module.function
+                func_name = parts[-1]
+            
+            # Skip private functions unless they're special
+            if func_name.startswith('_') and not func_name.startswith('__'):
+                continue
                 
-                if "signature" in attrs:
-                    func_info["signature"] = attrs["signature"]
-                if "docstring" in attrs and attrs["docstring"]:
-                    func_info["docstring"] = attrs["docstring"][:100]
-                if "decorators" in attrs and attrs["decorators"]:
-                    func_info["decorators"] = attrs["decorators"]
-                if "is_async" in attrs:
-                    func_info["is_async"] = attrs["is_async"]
+            func_info = {}
+            
+            # Add signature
+            if "signature" in attrs:
+                func_info["signature"] = attrs["signature"]
+            else:
+                # Construct basic signature
+                if attrs.get("is_async"):
+                    func_info["signature"] = f"async def {func_name}(...)"
+                else:
+                    func_info["signature"] = f"def {func_name}(...)"
+                if self.debug:
+                    print(f"   ⚠️  No signature for {func_name}, using placeholder")
                     
-                if self.complexity:
-                    if "cyclomatic_complexity" in attrs:
-                        func_info["complexity"] = attrs["cyclomatic_complexity"]
-                        
-                functions[func_name] = func_info
+            # Add docstring
+            if attrs.get("docstring"):
+                doc = attrs["docstring"]
+                if len(doc) > 100:
+                    func_info["docstring"] = doc[:100] + "..."
+                else:
+                    func_info["docstring"] = doc
+                    
+            # Add decorators
+            if attrs.get("decorators"):
+                func_info["decorators"] = attrs["decorators"]
                 
-        # Return top 5 by complexity
-        return dict(itertools.islice(
-            sorted(functions.items(), 
-                   key=lambda x: x[1].get("complexity", 0), 
-                   reverse=True),
-            5
-        ))
+            # Add async flag
+            if attrs.get("is_async"):
+                func_info["is_async"] = True
+                
+            # Add complexity
+            if self.complexity and "cyclomatic_complexity" in attrs:
+                func_info["complexity"] = attrs["cyclomatic_complexity"]
+                
+            # Add special method flags
+            for flag in ["is_property", "is_classmethod", "is_staticmethod", "is_dunder"]:
+                if attrs.get(flag):
+                    func_info[flag] = True
+                    
+            functions[func_name] = func_info
+        
+        # Sort by complexity, then name
+        sorted_functions = sorted(
+            functions.items(),
+            key=lambda x: (
+                -x[1].get("complexity", 0),  # Higher complexity first
+                not x[0].startswith('__'),    # Dunder methods last
+                x[0]                          # Alphabetical
+            )
+        )
+        
+        # Return top 20 functions
+        return dict(sorted_functions[:20])
 
     def _calculate_module_complexity(self, module: str) -> Dict[str, Any]:
         """Calculate module-level complexity metrics"""
@@ -325,7 +428,7 @@ class GraphSerializer:
         ]
         
         if not functions:
-            return {"rating": "simple", "avg_cyclomatic": 0}
+            return {"rating": ComplexityLevel.SIMPLE.value, "avg_cyclomatic": 0}
             
         complexities = []
         for f in functions:
@@ -333,7 +436,7 @@ class GraphSerializer:
                 complexities.append(self.g.nodes[f]["cyclomatic_complexity"])
                 
         if not complexities:
-            return {"rating": "simple", "avg_cyclomatic": 0}
+            return {"rating": ComplexityLevel.SIMPLE.value, "avg_cyclomatic": 0}
             
         avg_complexity = sum(complexities) / len(complexities)
         max_complexity = max(complexities)
@@ -397,7 +500,7 @@ class GraphSerializer:
                 all_complexities.append(a["cyclomatic_complexity"])
                 
         if not all_complexities:
-            return {"rating": "simple", "average": 0}
+            return {"rating": ComplexityLevel.SIMPLE.value, "average": 0}
             
         avg = sum(all_complexities) / len(all_complexities)
         return {
@@ -415,19 +518,19 @@ class GraphSerializer:
             if a["type"] == NodeType.CLASS:
                 methods = [
                     m for m in self.g.successors(n)
-                    if self.g.edges[n, m]["type"] == EdgeType.DEFINES
+                    if n in self.g and m in self.g and
+                    self.g.edges.get((n, m), {}).get("type") == EdgeType.DEFINES
                 ]
                 
                 method_names = [_short(m) for m in methods]
                 
                 # Check for singleton indicators
                 if any(name in ["get_instance", "instance", "__new__"] for name in method_names):
-                    if any("instance" in self.g.nodes[m].get("docstring", "").lower() for m in methods):
-                        patterns.append({
-                            "type": DesignPattern.SINGLETON.value,
-                            "class": _short(n),
-                            "confidence": "high"
-                        })
+                    patterns.append({
+                        "type": DesignPattern.SINGLETON.value,
+                        "class": _short(n),
+                        "confidence": "high" if "instance" in str(method_names) else "medium"
+                    })
                         
                 # Check for factory pattern
                 if any(name in ["create", "build", "make"] for name in method_names):
@@ -445,19 +548,21 @@ class GraphSerializer:
                         "confidence": "high"
                     })
                     
-        # Dependency injection pattern
+        # Observer pattern (has subscribe/notify methods)
         for n, a in self.g.nodes(data=True):
-            if a["type"] == NodeType.FUNCTION and "signature" in a:
-                sig = a["signature"]
-                # Simple check for DI pattern
-                if sig.count(":") > 2 and "__init__" in n:
+            if a["type"] == NodeType.CLASS:
+                methods = self._get_class_methods(n)
+                method_names = [_short(m) for m in methods]
+                
+                if any(name in ["subscribe", "attach", "register"] for name in method_names) and \
+                   any(name in ["notify", "update", "publish"] for name in method_names):
                     patterns.append({
-                        "type": DesignPattern.DEPENDENCY_INJECTION.value,
-                        "function": _short(n),
-                        "confidence": "low"
+                        "type": DesignPattern.OBSERVER.value,
+                        "class": _short(n),
+                        "confidence": "high"
                     })
                     
-        return patterns
+        return patterns[:10]  # Return top 10 patterns
 
     def _analyze_test_coverage(self) -> Dict[str, Any]:
         """Analyze test coverage relationships"""
@@ -471,11 +576,12 @@ class GraphSerializer:
                 # Find what this test module tests
                 for _, target, edge_attrs in self.g.out_edges(n, data=True):
                     if edge_attrs["type"] in [EdgeType.IMPORTS, EdgeType.CALLS]:
-                        if not ("test" in target):
+                        if not ("test" in target or "tests" in target):
                             module = ".".join(target.split(".")[:-1]) or target
                             tested_modules[module] += 1
                             
-        total_modules = sum(1 for _, a in self.g.nodes(data=True) if a["type"] == NodeType.MODULE)
+        total_modules = sum(1 for _, a in self.g.nodes(data=True) 
+                          if a["type"] == NodeType.MODULE and not ("test" in _ or "tests" in _))
         test_module_count = len(test_modules)
         tested_module_count = len(tested_modules)
         
@@ -483,7 +589,7 @@ class GraphSerializer:
             "test_modules": test_module_count,
             "tested_modules": tested_module_count,
             "total_modules": total_modules,
-            "coverage_ratio": round(tested_module_count / max(total_modules - test_module_count, 1), 2),
+            "coverage_ratio": round(tested_module_count / max(total_modules, 1), 2),
             "most_tested": [m for m, _ in tested_modules.most_common(5)]
         }
 
@@ -499,7 +605,7 @@ class GraphSerializer:
             for _, t, edge_a in self.g.out_edges(m, data=True):
                 if edge_a["type"] == EdgeType.IMPORTS:
                     # Extract module part
-                    if self.g.nodes[t]["type"] == NodeType.EXTERNAL_LIB:
+                    if t in self.g.nodes and self.g.nodes[t]["type"] == NodeType.EXTERNAL_LIB:
                         imports.add(_short(t).split(".")[0])
                     else:
                         mod_parts = t.split(".")
@@ -524,16 +630,19 @@ class GraphSerializer:
             # Find internal module dependencies
             for _, t, edge_a in self.g.out_edges(m, data=True):
                 if edge_a["type"] == EdgeType.IMPORTS:
-                    if t in self.g.nodes and self.g.nodes[t]["type"] == NodeType.MODULE:
-                        deps.append(_short(t))
-                    elif "." in t:
-                        # Extract module part
-                        mod = ".".join(t.split(".")[:-1])
-                        if mod in self.g.nodes and self.g.nodes[mod]["type"] == NodeType.MODULE:
-                            deps.append(_short(mod))
+                    if t in self.g.nodes:
+                        t_type = self.g.nodes[t]["type"]
+                        if t_type == NodeType.MODULE:
+                            deps.append(_short(t))
+                        elif t_type != NodeType.EXTERNAL_LIB:
+                            # Extract module from function/class
+                            mod = ".".join(t.split(".")[:-1])
+                            if mod and mod in self.g.nodes:
+                                if self.g.nodes[mod]["type"] == NodeType.MODULE:
+                                    deps.append(_short(mod))
                             
             if deps:
-                graph[mod_name] = list(set(deps))
+                graph[mod_name] = sorted(list(set(deps)))
                 
         return graph
 
@@ -543,11 +652,40 @@ class GraphSerializer:
         
         # Start from entry points
         for entry in self.entry_points[:3]:
-            chain = self._trace_call_chain(entry, max_depth=5)
-            if len(chain) > 2:
-                chains.append([_short(c) for c in chain])
-                
+            if entry in self.g.nodes:
+                chain = self._trace_call_chain(entry, max_depth=5)
+                if len(chain) > 2:
+                    chains.append([_short(c) for c in chain])
+                    
         return chains
+
+    def _find_hot_paths(self) -> List[Dict[str, Any]]:
+        """Find most frequently called paths"""
+        call_counts = Counter()
+        
+        # Count incoming calls for each function
+        for _, target, attrs in self.g.edges(data=True):
+            if attrs["type"] == EdgeType.CALLS:
+                call_counts[target] += 1
+                
+        # Find paths through hot functions
+        hot_paths = []
+        for func, count in call_counts.most_common(5):
+            if func in self.g.nodes:
+                # Trace backwards to find callers
+                callers = []
+                for source, _, attrs in self.g.in_edges(func, data=True):
+                    if attrs["type"] == EdgeType.CALLS:
+                        callers.append(source)
+                        
+                if callers:
+                    hot_paths.append({
+                        "function": _short(func),
+                        "call_count": count,
+                        "callers": [_short(c) for c in callers[:5]]
+                    })
+                    
+        return hot_paths
 
     def _trace_call_chain(self, start: str, max_depth: int = 5) -> List[str]:
         """Trace a call chain from a starting point"""
@@ -557,11 +695,11 @@ class GraphSerializer:
         
         for _ in range(max_depth):
             # Find most important call
-            calls = [
-                (t, self.g.nodes[t]["importance"])
-                for _, t, a in self.g.out_edges(current, data=True)
-                if a["type"] == EdgeType.CALLS and t not in visited
-            ]
+            calls = []
+            for _, target, attrs in self.g.out_edges(current, data=True):
+                if attrs["type"] == EdgeType.CALLS and target not in visited:
+                    importance = self.g.nodes[target].get("importance", 0)
+                    calls.append((target, importance))
             
             if not calls:
                 break
@@ -588,47 +726,71 @@ class GraphSerializer:
                 if n.startswith(f"{m}.") and not _short(n).startswith("_"):
                     node_attrs = self.g.nodes[n]
                     if node_attrs["type"] in [NodeType.CLASS, NodeType.FUNCTION]:
-                        # Check if it's directly in the module (not nested)
+                        # Check if it's directly in the module
                         parts_after_module = n[len(m)+1:].split(".")
                         if len(parts_after_module) == 1:  # Direct child
-                            item = _short(n)
+                            item_info = {"name": _short(n)}
+                            
                             if self.include_code and "signature" in node_attrs:
-                                item = node_attrs["signature"]
-                            public_items.append(item)
+                                item_info["signature"] = node_attrs["signature"]
+                            
+                            if node_attrs.get("docstring"):
+                                item_info["doc"] = node_attrs["docstring"][:80]
+                                
+                            public_items.append(item_info)
                             
             if public_items:
-                api[_short(m)] = sorted(public_items)[:20]
+                api[_short(m)] = public_items[:20]
                 
         return api
 
-    def _core_modules(self):
+    def _extract_class_hierarchy(self) -> Dict[str, Any]:
+        """Extract class inheritance hierarchy"""
+        hierarchy = {}
+        
+        # Find all inheritance relationships
+        for source, target, attrs in self.g.edges(data=True):
+            if attrs["type"] == EdgeType.INHERITS:
+                if target not in hierarchy:
+                    hierarchy[target] = {"base": _short(target), "derived": []}
+                hierarchy[target]["derived"].append(_short(source))
+                
+        # Add classes without inheritance
+        for n, attrs in self.g.nodes(data=True):
+            if attrs["type"] == NodeType.CLASS:
+                class_name = _short(n)
+                if n not in hierarchy and not any(n in h["derived"] for h in hierarchy.values()):
+                    hierarchy[n] = {"base": class_name, "derived": []}
+                    
+        return hierarchy
+
+    def _get_class_methods(self, class_node: str) -> List[str]:
+        """Get all methods of a class"""
+        methods = []
+        for target, attrs in self.g.nodes(data=True):
+            if (attrs["type"] == NodeType.FUNCTION and 
+                target.startswith(f"{class_node}.")):
+                methods.append(target)
+        return methods
+
+    def _core_modules(self) -> List[str]:
         """Identify core modules by importance"""
         score = Counter()
         for n, a in self.g.nodes(data=True):
-            if a["type"] == NodeType.MODULE:
-                continue
-            mod = ".".join(n.split(".")[:-1])
-            score[mod] += a["importance"]
+            if a["type"] != NodeType.MODULE:
+                mod = ".".join(n.split(".")[:-1])
+                if mod:
+                    score[mod] += a.get("importance", 0)
+                    
         return [m for m, _ in score.most_common(10)]
 
-    def _trace_main_flow(self):
+    def _trace_main_flow(self) -> List[str]:
         """Trace main execution flow"""
         if not self.entry_points:
+            # Try to find a main function
+            for n in self.g.nodes:
+                if n.endswith(".main") or n == "main":
+                    return self._trace_call_chain(n, max_depth=10)
             return []
-        start = self.entry_points[0]
-        path = [start]
-        visited = {start}
-        cur = start
-        for _ in range(10):
-            nxt_edges = [
-                (t, self.g.nodes[t]["importance"])
-                for _, t, a in self.g.out_edges(cur, data=True)
-                if a["type"] == EdgeType.CALLS and t not in visited
-            ]
-            if not nxt_edges:
-                break
-            nxt = max(nxt_edges, key=lambda x: x[1])[0]
-            path.append(nxt)
-            visited.add(nxt)
-            cur = nxt
-        return [_short(p) for p in path]
+            
+        return self._trace_call_chain(self.entry_points[0], max_depth=10)
