@@ -1,103 +1,117 @@
 # src/codesynapse/__init__.py
+"""
+CodeSynapse 0.4.0-LLM
+LLM-optimized Python code analyzer with enhanced metrics.
+"""
 
-__version__ = "0.1.0"
-__author__ = "Raykim"
-__email__ = "phillar85@gmail.com"
-__description__ = "A powerful Python tool that visualizes code structure and relationships as interactive graphs"
+from pathlib import Path
+import json
 
 from .builder import GraphBuilder
-from .visualizer import visualize_graph
 from .serializer import GraphSerializer
 
-def generate_graph(project_path, output_filename="codesynapse_graph.html"):
-    """
-    Generate an interactive graph visualization of a Python project.
-    
-    Args:
-        project_path (str): Path to the Python project root directory.
-        output_filename (str): Name of the output HTML file.
-    """
-    print(f"Starting analysis of project at: {project_path}")
-    builder = GraphBuilder(project_path)
-    graph = builder.build()
-    print(f"Found {graph.number_of_nodes()} nodes and {graph.number_of_edges()} edges.")
-    visualize_graph(graph, output_filename)
+__version__ = "0.4.0-llm"
+__author__ = "Raykim"
+__email__ = "phillar85@gmail.com"
 
-def generate_json(project_path, output_filename="codesynapse_analysis.json", 
-                  llm_format=False, include_metadata=True, pretty=True):
+
+def generate_json(
+    project_path: str,
+    output: str = "codesynapse.json",
+    *,
+    mode: str = "compressed",
+    view: str | None = None,
+    important_only: bool = True,
+    max_depth: int | None = 2,
+    chunk_tokens: int | None = None,
+    pretty: bool = True,
+    include_code: bool = False,
+    complexity: bool = False,
+    test_coverage: bool = False,
+    detect_patterns: bool = False,
+):
     """
-    Generate a JSON analysis of a Python project structure.
-    
-    Args:
-        project_path (str): Path to the Python project root directory.
-        output_filename (str): Name of the output JSON file.
-        llm_format (bool): Use LLM-friendly format if True.
-        include_metadata (bool): Include metadata in output.
-        pretty (bool): Pretty print JSON output.
-    
-    Returns:
-        dict: The generated analysis data.
+    Analyze a Python project and export JSON.
+
+    Parameters
+    ----------
+    project_path : str
+        Root directory of the Python project.
+    output : str
+        Output file path.
+    mode : str
+        Serialization mode: summary | compressed | friendly | full
+    view : str | None
+        Purpose-specific view: architecture | dependencies | flow | api
+    important_only : bool
+        Keep only the most-important nodes.
+    max_depth : int | None
+        Limit call-graph expansion depth.
+    chunk_tokens : int | None
+        Split output into multiple chunks.
+    pretty : bool
+        Pretty-print JSON.
+    include_code : bool
+        Include function signatures and docstrings.
+    complexity : bool
+        Calculate and include complexity metrics.
+    test_coverage : bool
+        Analyze test coverage relationships.
+    detect_patterns : bool
+        Detect common design patterns.
     """
-    print(f"Starting analysis of project at: {project_path}")
-    builder = GraphBuilder(project_path)
+    builder = GraphBuilder(project_path, collect_signatures=include_code)
     graph = builder.build()
-    print(f"Found {graph.number_of_nodes()} nodes and {graph.number_of_edges()} edges.")
-    
-    serializer = GraphSerializer(graph, project_path)
-    
-    if llm_format:
-        data = serializer.to_llm_format()
-    else:
-        data = serializer.to_dict(include_metadata=include_metadata)
-    
-    # Save to file
-    import json
-    with open(output_filename, 'w', encoding='utf-8') as f:
-        if pretty:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+    serializer = GraphSerializer(
+        graph,
+        project_path,
+        important_only=important_only,
+        max_depth=max_depth,
+        include_code=include_code,
+        complexity=complexity,
+        test_coverage=test_coverage,
+        detect_patterns=detect_patterns,
+    )
+
+    # View mode
+    if view:
+        data = serializer.generate_view(view)
+        if isinstance(data, str):
+            Path(output).write_text(data, encoding="utf-8")
         else:
-            json.dump(data, f, ensure_ascii=False, default=str)
-    
-    print(f"JSON analysis saved to: {output_filename}")
+            Path(output).write_text(
+                json.dumps(data, indent=(2 if pretty else None), ensure_ascii=False),
+                encoding="utf-8",
+            )
+        print(f"✅  view:{view} saved → {output}")
+        return data
+
+    # Chunking mode
+    if chunk_tokens:
+        chunks = serializer.to_llm_chunks(
+            mode=mode,
+            max_tokens=chunk_tokens,
+        )
+        base = Path(output)
+        base.parent.mkdir(parents=True, exist_ok=True)
+        for idx, chunk in enumerate(chunks, 1):
+            part_file = base.with_stem(f"{base.stem}_part{idx}")
+            part_file.write_text(
+                json.dumps(chunk, indent=(2 if pretty else None), ensure_ascii=False),
+                encoding="utf-8",
+            )
+        print(f"✅  {len(chunks)} JSON chunks saved under {base.parent}")
+        return chunks
+
+    # Single file output
+    data = serializer.serialize(mode=mode)
+    Path(output).write_text(
+        json.dumps(data, indent=(2 if pretty else None), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"✅  JSON saved → {output}")
     return data
 
-def analyze_project(project_path, return_format="dict", llm_format=False):
-    """
-    Analyze a Python project and return the analysis data.
-    
-    Args:
-        project_path (str): Path to the Python project root directory.
-        return_format (str): Format of return value - "dict", "json", or "graph".
-        llm_format (bool): Use LLM-friendly format if True (only for dict/json).
-    
-    Returns:
-        Union[dict, str, nx.DiGraph]: Analysis data in requested format.
-    """
-    builder = GraphBuilder(project_path)
-    graph = builder.build()
-    
-    if return_format == "graph":
-        return graph
-    
-    serializer = GraphSerializer(graph, project_path)
-    
-    if llm_format:
-        data = serializer.to_llm_format()
-    else:
-        data = serializer.to_dict(include_metadata=True)
-    
-    if return_format == "json":
-        import json
-        return json.dumps(data, indent=2, ensure_ascii=False, default=str)
-    
-    return data
 
-__all__ = [
-    "generate_graph", 
-    "generate_json",
-    "analyze_project",
-    "GraphBuilder", 
-    "visualize_graph",
-    "GraphSerializer",
-    "__version__"
-]
+__all__ = ["generate_json", "GraphBuilder", "GraphSerializer", "__version__"]
